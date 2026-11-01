@@ -1,0 +1,460 @@
+extends Node2D
+## Orbit Keeper — hop between orbit rings, collect star shards, dodge meteors.
+## Everything is drawn procedurally in _draw(); no external assets.
+
+enum State { TITLE, PLAY, OVER }
+
+const RINGS := [130.0, 200.0, 270.0]
+const PLANET_R := 62.0
+const PLAYER_R := 10.0
+const PLAYER_SPEED := 270.0       # linear speed along the ring, px/s
+const RING_LERP := 14.0           # how fast the moon slides between rings
+const COMBO_WINDOW := 2.5         # seconds to keep a combo alive
+const SAVE_PATH := "user://best.save"
+
+const COL_PLANET := Color(0.25, 0.55, 0.95)
+const COL_RING := Color(0.4, 0.5, 0.9, 0.18)
+const COL_PLAYER := Color(1.0, 0.95, 0.8)
+const COL_SHARD := Color(1.0, 0.85, 0.25)
+const COL_METEOR := Color(1.0, 0.4, 0.25)
+
+var state := State.TITLE
+var font: Font
+
+# Player
+var ring := 1
+var radius := 200.0
+var angle := 0.0
+var dir := 1.0
+var trail: Array[Vector2] = []
+
+# World
+var shards: Array = []     # {ring, angle, t}
+var meteors: Array = []    # {pos, vel, r, spin, rot}
+var particles: Array = []  # {pos, vel, life, max, col, size}
+var stars: Array = []      # {pos, size, phase}
+
+var score := 0
+var best := 0
+var combo := 1
+var combo_timer := 0.0
+var time_alive := 0.0
+var spawn_timer := 1.5
+var shake := 0.0
+var flash := 0.0
+var popups: Array = []     # {pos, text, life}
+var over_timer := 0.0
+
+
+func _ready() -> void:
+	randomize()
+	font = ThemeDB.fallback_font
+	_load_best()
+	_make_stars()
+	get_viewport().size_changed.connect(_make_stars)
+
+
+func _center() -> Vector2:
+	return get_viewport_rect().size * 0.5
+
+
+func _make_stars() -> void:
+	stars.clear()
+	var sz := get_viewport_rect().size
+	for i in 220:
+		stars.append({
+			"pos": Vector2(randf() * sz.x, randf() * sz.y),
+			"size": randf_range(0.6, 2.0),
+			"phase": randf() * TAU,
+		})
+
+
+# ---------------------------------------------------------------- game flow
+
+func _start() -> void:
+	state = State.PLAY
+	ring = 1
+	radius = RINGS[ring]
+	angle = -PI / 2.0
+	dir = 1.0
+	trail.clear()
+	shards.clear()
+	meteors.clear()
+	popups.clear()
+	score = 0
+	combo = 1
+	combo_timer = 0.0
+	time_alive = 0.0
+	spawn_timer = 1.5
+	for i in 3:
+		_spawn_shard()
+
+
+func _game_over() -> void:
+	state = State.OVER
+	over_timer = 0.0
+	shake = 18.0
+	flash = 1.0
+	_burst(_player_pos(), COL_PLAYER, 60, 380.0)
+	_burst(_player_pos(), COL_METEOR, 30, 250.0)
+	if score > best:
+		best = score
+		_save_best()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	var up := false
+	var down := false
+	var flip := false
+	var confirm := false
+
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_UP, KEY_W: up = true
+			KEY_DOWN, KEY_S: down = true
+			KEY_SPACE, KEY_LEFT, KEY_RIGHT, KEY_A, KEY_D: flip = true
+			KEY_ENTER, KEY_KP_ENTER: confirm = true
+			KEY_ESCAPE: get_tree().quit()
+		if event.keycode == KEY_SPACE:
+			confirm = true
+	elif event is InputEventMouseButton and event.pressed:
+		match event.button_index:
+			MOUSE_BUTTON_LEFT: up = true; confirm = true
+			MOUSE_BUTTON_RIGHT: down = true
+			MOUSE_BUTTON_MIDDLE: flip = true
+
+	match state:
+		State.TITLE:
+			if confirm or up:
+				_start()
+		State.OVER:
+			if (confirm or up) and over_timer > 0.6:
+				_start()
+		State.PLAY:
+			if up:
+				_change_ring(1)
+			elif down:
+				_change_ring(-1)
+			if flip:
+				dir = -dir
+				_burst(_player_pos(), Color(0.6, 0.8, 1.0), 8, 120.0)
+
+
+func _change_ring(delta: int) -> void:
+	var n := clampi(ring + delta, 0, RINGS.size() - 1)
+	if n != ring:
+		ring = n
+		_burst(_player_pos(), Color(0.6, 0.8, 1.0), 6, 90.0)
+
+
+# ---------------------------------------------------------------- update
+
+func _process(delta: float) -> void:
+	shake = maxf(0.0, shake - delta * 40.0)
+	flash = maxf(0.0, flash - delta * 2.5)
+	_update_particles(delta)
+	_update_popups(delta)
+
+	match state:
+		State.PLAY:
+			_update_play(delta)
+		State.OVER:
+			over_timer += delta
+			_update_meteors(delta, false)
+		State.TITLE:
+			angle += delta * 0.8
+			radius = RINGS[1]
+
+	queue_redraw()
+
+
+func _update_play(delta: float) -> void:
+	time_alive += delta
+
+	# Moon movement: constant linear speed, so inner rings orbit faster.
+	radius = lerpf(radius, RINGS[ring], 1.0 - exp(-RING_LERP * delta))
+	angle = wrapf(angle + dir * PLAYER_SPEED / radius * delta, -PI, PI)
+	var p := _player_pos()
+	trail.push_front(p)
+	if trail.size() > 18:
+		trail.pop_back()
+
+	# Combo decay
+	if combo > 1:
+		combo_timer -= delta
+		if combo_timer <= 0.0:
+			combo = 1
+
+	# Shards
+	for s in shards:
+		s.t += delta
+	for i in range(shards.size() - 1, -1, -1):
+		var s: Dictionary = shards[i]
+		var sp := _ring_point(s.ring, s.angle)
+		if sp.distance_to(p) < PLAYER_R + 12.0:
+			var gained := 10 * combo
+			score += gained
+			popups.append({"pos": sp, "text": "+%d" % gained, "life": 1.0})
+			combo = mini(combo + 1, 9)
+			combo_timer = COMBO_WINDOW
+			_burst(sp, COL_SHARD, 18, 200.0)
+			shards.remove_at(i)
+			_spawn_shard()
+
+	# Meteor spawning ramps up over time
+	spawn_timer -= delta
+	if spawn_timer <= 0.0:
+		_spawn_meteor()
+		var interval := lerpf(1.3, 0.32, clampf(time_alive / 120.0, 0.0, 1.0))
+		spawn_timer = interval * randf_range(0.7, 1.3)
+
+	_update_meteors(delta, true)
+
+
+func _update_meteors(delta: float, check_player: bool) -> void:
+	var c := _center()
+	var p := _player_pos()
+	var limit := get_viewport_rect().size.length() * 0.75
+	for i in range(meteors.size() - 1, -1, -1):
+		var m: Dictionary = meteors[i]
+		m.pos += m.vel * delta
+		m.rot += m.spin * delta
+		if randf() < 0.6:
+			particles.append({
+				"pos": m.pos, "vel": -m.vel * 0.15 + Vector2(randf_range(-20, 20), randf_range(-20, 20)),
+				"life": 0.5, "max": 0.5, "col": Color(1.0, 0.55, 0.2, 0.7), "size": m.r * 0.35,
+			})
+		var rel: Vector2 = m.pos - c
+		if rel.length() < PLANET_R + m.r * 0.5:
+			_burst(m.pos, COL_METEOR, 20, 180.0)
+			shake = maxf(shake, 4.0)
+			meteors.remove_at(i)
+			continue
+		if check_player and m.pos.distance_to(p) < PLAYER_R + m.r * 0.8:
+			meteors.remove_at(i)
+			_game_over()
+			return
+		if rel.length() > limit and rel.dot(m.vel) > 0.0:
+			meteors.remove_at(i)
+
+
+func _update_particles(delta: float) -> void:
+	for i in range(particles.size() - 1, -1, -1):
+		var pt: Dictionary = particles[i]
+		pt.life -= delta
+		if pt.life <= 0.0:
+			particles.remove_at(i)
+			continue
+		pt.pos += pt.vel * delta
+		pt.vel *= 1.0 - 2.5 * delta
+
+
+func _update_popups(delta: float) -> void:
+	for i in range(popups.size() - 1, -1, -1):
+		popups[i].life -= delta
+		popups[i].pos.y -= 40.0 * delta
+		if popups[i].life <= 0.0:
+			popups.remove_at(i)
+
+
+# ---------------------------------------------------------------- spawning
+
+func _spawn_shard() -> void:
+	# Avoid spawning right on top of the player.
+	for attempt in 10:
+		var r := randi() % RINGS.size()
+		var a := randf_range(-PI, PI)
+		if _ring_point(r, a).distance_to(_player_pos()) > 120.0:
+			shards.append({"ring": r, "angle": a, "t": 0.0})
+			return
+	shards.append({"ring": randi() % RINGS.size(), "angle": randf_range(-PI, PI), "t": 0.0})
+
+
+func _spawn_meteor() -> void:
+	var c := _center()
+	var start_dist := get_viewport_rect().size.length() * 0.6
+	var a := randf() * TAU
+	var start := c + Vector2.from_angle(a) * start_dist
+	# Aim somewhere across the ring zone, not always at the planet.
+	var target := c + Vector2.from_angle(randf() * TAU) * randf_range(0.0, RINGS[-1] + 20.0)
+	var difficulty := clampf(time_alive / 90.0, 0.0, 1.0)
+	var speed := randf_range(140.0, 200.0) + difficulty * 160.0
+	meteors.append({
+		"pos": start,
+		"vel": (target - start).normalized() * speed,
+		"r": randf_range(9.0, 20.0),
+		"spin": randf_range(-3.0, 3.0),
+		"rot": randf() * TAU,
+	})
+
+
+func _burst(pos: Vector2, col: Color, count: int, speed: float) -> void:
+	for i in count:
+		var life := randf_range(0.3, 0.9)
+		particles.append({
+			"pos": pos,
+			"vel": Vector2.from_angle(randf() * TAU) * randf_range(0.2, 1.0) * speed,
+			"life": life, "max": life, "col": col, "size": randf_range(1.5, 3.5),
+		})
+
+
+# ---------------------------------------------------------------- helpers
+
+func _ring_point(r: int, a: float) -> Vector2:
+	return _center() + Vector2.from_angle(a) * RINGS[r]
+
+
+func _player_pos() -> Vector2:
+	return _center() + Vector2.from_angle(angle) * radius
+
+
+func _load_best() -> void:
+	if FileAccess.file_exists(SAVE_PATH):
+		var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+		if f:
+			best = f.get_32()
+
+
+func _save_best() -> void:
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f:
+		f.store_32(best)
+
+
+# ---------------------------------------------------------------- drawing
+
+func _draw() -> void:
+	var sz := get_viewport_rect().size
+	var off := Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
+	draw_set_transform(off)
+	var c := _center()
+	var t := Time.get_ticks_msec() / 1000.0
+
+	# Starfield
+	for s in stars:
+		var tw := 0.5 + 0.5 * sin(t * 1.5 + s.phase)
+		draw_circle(s.pos, s.size, Color(0.8, 0.85, 1.0, 0.25 + 0.5 * tw))
+
+	# Rings (highlight the current one)
+	for i in RINGS.size():
+		var col := COL_RING
+		if state == State.PLAY and i == ring:
+			col = Color(0.5, 0.65, 1.0, 0.4)
+		draw_arc(c, RINGS[i], 0, TAU, 128, col, 2.0, true)
+
+	# Planet with glow, bands and terminator shading
+	for g in 6:
+		draw_circle(c, PLANET_R + 6 + g * 6, Color(COL_PLANET, 0.05))
+	draw_circle(c, PLANET_R, COL_PLANET)
+	draw_arc(c, PLANET_R * 0.7, 0.3, 2.2, 32, Color(0.4, 0.75, 1.0, 0.5), 6.0, true)
+	draw_arc(c, PLANET_R * 0.45, 3.5, 5.2, 32, Color(0.15, 0.35, 0.8, 0.6), 5.0, true)
+	draw_arc(c, PLANET_R - 5, 0.0, PI / 2.0 + 0.6, 32, Color(0, 0, 0.15, 0.35), 10.0, true)
+	draw_circle(c + Vector2(-22, -24), 10.0, Color(1, 1, 1, 0.12))
+
+	# Shards: rotating four-point stars
+	for s in shards:
+		var sp := _ring_point(s.ring, s.angle)
+		var pulse := 1.0 + 0.2 * sin(s.t * 6.0)
+		var appear := clampf(s.t * 3.0, 0.0, 1.0)
+		_draw_star(sp, 9.0 * pulse * appear, s.t * 2.0, COL_SHARD)
+		draw_circle(sp, 16.0 * appear, Color(COL_SHARD, 0.12))
+
+	# Meteors + edge warnings
+	for m in meteors:
+		_draw_meteor(m)
+		_draw_warning(m, sz)
+
+	# Particles
+	for pt in particles:
+		var k: float = pt.life / pt.max
+		draw_circle(pt.pos, pt.size * k, Color(pt.col, pt.col.a * k))
+
+	# Player
+	if state != State.OVER:
+		for i in trail.size():
+			var k := 1.0 - float(i) / trail.size()
+			draw_circle(trail[i], PLAYER_R * k * 0.8, Color(0.6, 0.8, 1.0, 0.35 * k))
+		var p := _player_pos()
+		draw_circle(p, PLAYER_R + 6, Color(COL_PLAYER, 0.15))
+		draw_circle(p, PLAYER_R, COL_PLAYER)
+		draw_circle(p + Vector2(3, 2), PLAYER_R * 0.35, Color(0.7, 0.68, 0.6))
+		# Direction chevron
+		var tangent := Vector2.from_angle(angle + dir * PI / 2.0)
+		var tip := p + tangent * (PLAYER_R + 9)
+		var side := tangent.orthogonal() * 4.0
+		draw_colored_polygon([tip, tip - tangent * 6 + side, tip - tangent * 6 - side], Color(0.7, 0.85, 1.0, 0.8))
+
+	# Popups
+	for pp in popups:
+		_text(pp.text, pp.pos, 20, Color(COL_SHARD, pp.life))
+
+	draw_set_transform(Vector2.ZERO)
+
+	if flash > 0.0:
+		draw_rect(Rect2(Vector2.ZERO, sz), Color(1, 0.6, 0.4, flash * 0.35))
+
+	_draw_hud(sz, t)
+
+
+func _draw_star(pos: Vector2, r: float, rot: float, col: Color) -> void:
+	var pts := PackedVector2Array()
+	for i in 8:
+		var rr := r if i % 2 == 0 else r * 0.4
+		pts.append(pos + Vector2.from_angle(rot + i * TAU / 8.0) * rr)
+	if r > 0.5:
+		draw_colored_polygon(pts, col)
+
+
+func _draw_meteor(m: Dictionary) -> void:
+	var pts := PackedVector2Array()
+	for i in 7:
+		var wobble := 0.75 + 0.25 * sin(i * 2.3 + m.r)
+		pts.append(m.pos + Vector2.from_angle(m.rot + i * TAU / 7.0) * m.r * wobble)
+	draw_circle(m.pos, m.r * 1.6, Color(COL_METEOR, 0.12))
+	draw_colored_polygon(pts, Color(0.6, 0.42, 0.32))
+	draw_circle(m.pos + Vector2.from_angle(m.rot) * m.r * 0.3, m.r * 0.22, Color(0.35, 0.22, 0.18))
+	draw_polyline(pts + PackedVector2Array([pts[0]]), COL_METEOR, 2.0, true)
+
+
+func _draw_warning(m: Dictionary, sz: Vector2) -> void:
+	var pos: Vector2 = m.pos
+	if Rect2(Vector2.ZERO, sz).has_point(pos):
+		return
+	var e := pos.clamp(Vector2(16, 16), sz - Vector2(16, 16))
+	var d := (pos - e).length()
+	var alpha := clampf(1.0 - d / 500.0, 0.15, 1.0)
+	var dirv: Vector2 = m.vel.normalized()
+	var side := dirv.orthogonal() * 7.0
+	draw_colored_polygon([e + dirv * 10, e - dirv * 6 + side, e - dirv * 6 - side], Color(COL_METEOR, alpha))
+
+
+func _draw_hud(sz: Vector2, t: float) -> void:
+	match state:
+		State.TITLE:
+			_text("ORBIT KEEPER", Vector2(sz.x / 2, sz.y * 0.16), 64, Color(0.85, 0.9, 1.0))
+			_text("Collect star shards. Dodge meteors.", Vector2(sz.x / 2, sz.y * 0.84), 22, Color(0.7, 0.75, 0.9))
+			_text("UP / W / LMB: outer ring    DOWN / S / RMB: inner ring    LEFT / RIGHT: reverse",
+				Vector2(sz.x / 2, sz.y * 0.89), 16, Color(0.55, 0.6, 0.8))
+			if fmod(t, 1.0) < 0.65:
+				_text("Press SPACE to start", Vector2(sz.x / 2, sz.y * 0.95), 22, Color(1, 1, 1))
+			if best > 0:
+				_text("Best: %d" % best, Vector2(sz.x / 2, sz.y * 0.22), 20, COL_SHARD)
+		State.PLAY:
+			_text("%d" % score, Vector2(sz.x / 2, 50), 40, Color(1, 1, 1))
+			if combo > 1:
+				var k := combo_timer / COMBO_WINDOW
+				_text("x%d combo" % combo, Vector2(sz.x / 2, 80), 20, Color(COL_SHARD, 0.4 + 0.6 * k))
+				draw_rect(Rect2(sz.x / 2 - 40, 92, 80 * k, 3), Color(COL_SHARD, 0.8))
+			_text("Best %d" % best, Vector2(sz.x - 80, 34), 16, Color(0.6, 0.65, 0.85), HORIZONTAL_ALIGNMENT_CENTER)
+		State.OVER:
+			_text("SHATTERED", Vector2(sz.x / 2, sz.y * 0.16), 56, COL_METEOR)
+			_text("Score %d" % score, Vector2(sz.x / 2, sz.y * 0.82), 32, Color(1, 1, 1))
+			var msg := "New best!" if score >= best and score > 0 else "Best %d" % best
+			_text(msg, Vector2(sz.x / 2, sz.y * 0.87), 20, COL_SHARD)
+			if over_timer > 0.6 and fmod(t, 1.0) < 0.65:
+				_text("Press SPACE to retry", Vector2(sz.x / 2, sz.y * 0.94), 22, Color(1, 1, 1))
+
+
+func _text(s: String, pos: Vector2, size: int, col: Color, align := HORIZONTAL_ALIGNMENT_CENTER) -> void:
+	var w := 1000.0
+	draw_string(font, pos - Vector2(w / 2, -size * 0.35), s, align, w, size, col)

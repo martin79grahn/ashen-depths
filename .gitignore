@@ -1,0 +1,4 @@
+# Godot cache and imports
+.godot/
+*.import
+export/
