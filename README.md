@@ -2,6 +2,13 @@
 
 An original top-down action RPG made in Godot 4.5. You move and fight by clicking, and every floor is a randomly generated dungeon full of humanoid zombies. Everything is generated and drawn in code.
 
+## Download & play
+Grab the latest build from the [Releases](https://github.com/martin79grahn/ashen-depths/releases) page:
+- **Linux:** unzip, then run `./AshenDepths.x86_64` (`chmod +x` it first if needed).
+- **Windows:** unzip and run `AshenDepths.exe`. Windows may warn about an unknown publisher (the build is unsigned): choose *More info → Run anyway*.
+
+To run from source, open the folder in Godot 4.5.1, or run `godot --path .`. Builds are made with `godot --headless --export-release "Linux"` / `"Windows"` (presets in `export_presets.cfg`, output in `export/`).
+
 ## Menu options
 - **How to Play [H]:** a manual with pages on the heroes, weapons, magic, enemies, bosses, items and controls. The Enemies and Bosses pages show animated pictures of every foe, drawn by the game itself (`portrait.gd`).
 - **Difficulty [D]:** Easy (enemies have 70% life and hit for 60%), Normal, Hard (135% / 140%) or Nightmare (180% / 190%). Boss Rush records are kept per difficulty.
