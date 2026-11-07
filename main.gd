@@ -192,6 +192,9 @@ var shake := 0.0
 var font: Font
 var camera: Camera2D
 var hud
+var touch_on := false            # a touch screen is in use: show the on-screen buttons
+var touch_fingers := {}          # touch index -> button held
+var touch_alt := false           # inventory/shop on a phone: a tap acts as a right click
 var portraits: Node          # the manual's enemy & boss pictures: one SubViewport each (portrait.gd)
 var audio
 var corpses: Array[Corpse] = []
@@ -382,6 +385,7 @@ func _ready() -> void:
 	audio = preload("res://audio.gd").new()
 	add_child(audio)
 
+	touch_on = OS.has_feature("mobile") or OS.has_feature("web_android") or OS.has_feature("web_ios")
 	hud = preload("res://hud.gd").new()
 	hud.main = self
 	hud.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -971,6 +975,54 @@ func _ring(pos: Vector2, r: float, col: Color) -> void:
 
 # ================================================================ input
 
+## Touch screens: the round buttons work with any finger, so you can walk and cast at once.
+func _input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			touch_on = true
+			var b: String = hud.touch_button_at(event.position)
+			if b != "":
+				touch_fingers[event.index] = b
+				_touch_press(b)
+		else:
+			touch_fingers.erase(event.index)
+
+
+func _touch_press(b: String) -> void:
+	match b:
+		"cast": _ranged(_auto_target())
+		"spell": _knight_cast(_auto_target())
+		"map": show_map = not show_map
+		"mode": touch_alt = not touch_alt
+
+
+## Where to aim from a touch button: the nearest foe in sight, or straight ahead.
+func _auto_target() -> Vector2:
+	var best: Enemy = null
+	var bd := 420.0
+	for e in enemies:
+		if e.hp <= 0.0 or e.mode == "vanish":
+			continue
+		var d := e.pos.distance_to(p_pos)
+		if d < bd and _los(p_pos, e.pos):
+			bd = d
+			best = e
+	return best.pos if best else p_pos + facing * 120.0
+
+
+func _notification(what: int) -> void:
+	# Android's back button/gesture closes panels, or leaves the manual / the game.
+	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		if manual_open:
+			manual_open = false
+		elif shop_open or inv_open:
+			shop_open = false
+			inv_open = false
+		elif state == "menu":
+			get_tree().quit()
+		elif dead:
+			_to_menu()
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state == "menu" and manual_open:
@@ -1064,14 +1116,27 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.button_index == MOUSE_BUTTON_MIDDLE:
 		_knight_cast()
 		return
+	if hud.touch_button_at(event.position) != "":
+		return                        # handled by _input
+	var belt: String = hud.belt_at(event.position) if event.button_index == MOUSE_BUTTON_LEFT else ""
+	if belt != "":
+		match belt:
+			"hp": _drink_hp()
+			"mp": _drink_mp()
+			"skill": _use_skill()
+			_: select_spell(belt.substr(6))
+		return
 	if hud.inv_button_rect().has_point(event.position):
 		inv_open = not inv_open
 		return
+	var btn: int = event.button_index
+	if touch_alt and touch_on and btn == MOUSE_BUTTON_LEFT:
+		btn = MOUSE_BUTTON_RIGHT
 	if shop_open and hud.shop_rect().has_point(event.position):
-		_shop_click(event.button_index, hud.shop_slot_at(event.position))
+		_shop_click(btn, hud.shop_slot_at(event.position))
 		return
 	if inv_open and hud.inv_panel_rect().has_point(event.position):
-		_inv_click(event.button_index, hud.inv_slot_at(event.position))
+		_inv_click(btn, hud.inv_slot_at(event.position))
 		return
 	var m := get_global_mouse_position()
 	if event.button_index == MOUSE_BUTTON_LEFT:
@@ -1598,9 +1663,12 @@ func equip_from_bag(i: int) -> void:
 
 
 func mouse_over_inventory() -> bool:
+	var mp := get_viewport().get_mouse_position()
+	# the belt and the touch buttons are UI too: holding them must not walk the hero
+	if hud.belt_at(mp) != "" or hud.touch_button_at(mp) != "":
+		return true
 	if not inv_open:
 		return false
-	var mp := get_viewport().get_mouse_position()
 	if shop_open and hud.shop_rect().has_point(mp):
 		return true
 	return hud.inv_panel_rect().has_point(mp) or hud.inv_button_rect().has_point(mp)
@@ -1677,6 +1745,8 @@ func _update_player(delta: float) -> void:
 		hold_timer = 0.12
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and not ui:
 		_ranged(get_global_mouse_position())
+	if "cast" in touch_fingers.values():
+		_ranged(_auto_target())       # holding Cast keeps firing (the cooldown sets the pace)
 
 	if target_enemy:
 		var e := target_enemy
@@ -2413,7 +2483,7 @@ func _shop_click(button: int, slot: Dictionary) -> void:
 # ================================================================ spell scrolls
 
 ## Knight: cast the active spell (no mana; each spell recharges on its own).
-func _knight_cast() -> void:
+func _knight_cast(at := Vector2.INF) -> void:
 	if dead or shop_open or hero != "knight":
 		return
 	var id := selected_spell
@@ -2423,7 +2493,7 @@ func _knight_cast() -> void:
 	if spell_cd.get(id, 0.0) > 0.0:
 		_float(p_pos, "%s recharging (%.0fs)" % [SPELLS[id].name, ceilf(spell_cd[id])], Color(0.7, 0.7, 0.8), 13)
 		return
-	var m := get_global_mouse_position()
+	var m := get_global_mouse_position() if at == Vector2.INF else at
 	if _cast_spell(id, spell_lvl[id], m):
 		spell_cd[id] = knight_cd(id)
 		facing = (m - p_pos).normalized() if m != p_pos else facing

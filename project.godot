@@ -5,14 +5,18 @@ config_version=5
 config/name="Ashen Depths"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
+config/icon="res://icon.png"
+config/quit_on_go_back=false
 
 [display]
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+window/handheld/orientation=4
 
 [rendering]
 renderer/rendering_method="forward_plus"
+textures/vram_compression/import_etc2_astc=true
 viewport/hdr_2d=true
 environment/defaults/default_clear_color=Color(0.01, 0.01, 0.01, 1)

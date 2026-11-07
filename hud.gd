@@ -193,10 +193,16 @@ func _draw() -> void:
 	if m.shop_open and not m.dead:
 		_draw_shop()
 
+	if m.touch_on and not m.dead:
+		_draw_touch()
+
 	if m.message_t > 0.0:
 		_label(m.message, Vector2(sz.x / 2, sz.y * 0.22), 28, Color(0.95, 0.85, 0.65, clampf(m.message_t, 0.0, 1.0)))
 
-	if m.depth == 1 and m.level == 1 and m.xp == 0:
+	if m.depth == 1 and m.level == 1 and m.xp == 0 and m.touch_on:
+		_label("Tap: move / attack / loot (hold to keep moving)    %s: %s at the nearest foe" % ["Crossbow" if knight else "Cast", "shoot" if knight else "cast your spell"], Vector2(sz.x / 2, sz.y - 120), 13, Color(0.75, 0.7, 0.6, 0.85))
+		_label("Tap the belt: potions, skill and spells    Back: close panels", Vector2(sz.x / 2, sz.y - 104), 13, Color(0.75, 0.7, 0.6, 0.85))
+	elif m.depth == 1 and m.level == 1 and m.xp == 0:
 		var hint := "LMB: move / attack / loot    Shift+LMB: attack in place    RMB: %s    Q: %s    1: potion" % [
 			"crossbow" if knight else "cast spell", "shield bash" if knight else "healing light"]
 		var hint2 := ("F / MMB: cast spell    3-6 / wheel: pick spell" if knight else "3-7 / wheel: pick spell") + "    I: inventory    M: map    N: music"
@@ -305,6 +311,75 @@ func inv_panel_rect() -> Rect2:
 
 func inv_button_rect() -> Rect2:
 	return Rect2(size.x / 2 + 255, size.y - 30, 86, 26)
+
+
+## The belt's clickable slots: "hp", "mp", "skill" and "spell:<id>" -> rectangle.
+func belt_rects() -> Dictionary:
+	var bx := size.x / 2 - 70
+	var r := {"hp": Rect2(bx, size.y - 30, 30, 26), "mp": Rect2(bx + 36, size.y - 30, 30, 26), "skill": Rect2(bx + 80, size.y - 30, 30, 26)}
+	var order: Array = main.spell_order()
+	for i in order.size():
+		r["spell:" + order[i]] = Rect2(bx - 44 - (order.size() - i) * 36, size.y - 30, 30, 26)
+	return r
+
+
+func belt_at(p: Vector2) -> String:
+	var r := belt_rects()
+	for k in r:
+		if (r[k] as Rect2).grow(3).has_point(p):
+			return k
+	return ""
+
+
+# ================================================================ touch controls
+## Round on-screen buttons for phones: name -> [center, radius, label].
+func touch_buttons() -> Dictionary:
+	var b := {}
+	if main.inv_open or main.shop_open:
+		return b                       # the panels need the room
+	var knight: bool = main.hero == "knight"
+	b["cast"] = [Vector2(size.x - 300, size.y - 130), 50.0, "Crossbow" if knight else "Cast"]
+	if knight:
+		b["spell"] = [Vector2(size.x - 300, size.y - 245), 40.0, "Spell"]
+	b["map"] = [Vector2(size.x - 60, 60), 30.0, "Map"]
+	return b
+
+
+func touch_button_at(p: Vector2) -> String:
+	if not main.touch_on or main.state != "play" or main.dead:
+		return ""
+	var b := touch_buttons()
+	for k in b:
+		if p.distance_to(b[k][0]) <= b[k][1] + 6.0:
+			return k
+	if (main.inv_open or main.shop_open) and touch_mode_rect().has_point(p):
+		return "mode"
+	return ""
+
+
+## In the inventory/shop on a phone: switches what a tap does (equip/buy or drop/sell).
+func touch_mode_rect() -> Rect2:
+	var r := inv_panel_rect()
+	return Rect2(r.position.x + 20, r.end.y + 6, r.size.x - 40, 34)
+
+
+func _draw_touch() -> void:
+	var m = main
+	var b := touch_buttons()
+	for k in b:
+		var held: bool = k in m.touch_fingers.values()
+		draw_circle(b[k][0], b[k][1], Color(0.12, 0.09, 0.06, 0.55 if not held else 0.8))
+		draw_arc(b[k][0], b[k][1], 0, TAU, 48, Color(0.75, 0.6, 0.35, 0.8), 2.0)
+		var txt: String = b[k][2]
+		if k == "spell" and m.selected_spell != "":
+			txt = m.SPELLS[m.selected_spell].name
+		_label(txt, b[k][0], 16 if k != "map" else 13, Color(0.95, 0.88, 0.7))
+	if m.inv_open or m.shop_open:
+		var r := touch_mode_rect()
+		draw_rect(r, Color(0.14, 0.1, 0.07, 0.9))
+		draw_rect(r, Color(0.6, 0.48, 0.28), false, 1.5)
+		var what := ("Tap = sell / drop" if m.shop_open else "Tap = drop on floor") if m.touch_alt else ("Tap = buy / equip" if m.shop_open else "Tap = equip")
+		_label(what + "   (tap here to switch)", r.get_center(), 15, Color(1.0, 0.85, 0.5) if m.touch_alt else Color(0.9, 0.85, 0.7))
 
 
 func _melee_slot() -> Rect2:

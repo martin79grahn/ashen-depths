@@ -6,8 +6,16 @@ An original top-down action RPG made in Godot 4.5. You move and fight by clickin
 Grab the latest build from the [Releases](https://github.com/martin79grahn/ashen-depths/releases) page:
 - **Linux:** unzip, then run `./AshenDepths.x86_64` (`chmod +x` it first if needed).
 - **Windows:** unzip and run `AshenDepths.exe`. Windows may warn about an unknown publisher (the build is unsigned): choose *More info → Run anyway*.
+- **Android:** download `AshenDepths.apk` on the phone, open it and allow installing from that source when Android asks.
 
-To run from source, open the folder in Godot 4.5.1, or run `godot --path .`. Builds are made with `godot --headless --export-release "Linux"` / `"Windows"` (presets in `export_presets.cfg`, output in `export/`).
+### Playing on a phone
+- **Tap** to move, attack, loot and use doors/stairs. Hold your finger down to keep walking.
+- **Cast** (Paladin) or **Crossbow** (Knight) fires at the nearest foe in sight. Hold it to keep firing. The Knight also has a **Spell** button for the active spell.
+- **Tap the belt** at the bottom for potions (1, 2), the class skill (Q) and to pick the active spell (3-7). The belt can be clicked on the computer too.
+- **Map** toggles the minimap. **Inventory** opens your gear. In the inventory and shop, the button under the panel switches what a tap does (equip/buy, or drop/sell).
+- Android's **back** button or gesture closes panels.
+
+To run from source, open the folder in Godot 4.5.1, or run `godot --path .`. Builds are made with `godot --headless --export-release "Linux"` / `"Windows"` / `"Android"` (the Android build needs a signing key, which is not in the repo) (presets in `export_presets.cfg`, output in `export/`).
 
 ## Menu options
 - **How to Play [H]:** a manual with pages on the heroes, weapons, magic, enemies, bosses, items and controls. The Enemies and Bosses pages show animated pictures of every foe, drawn by the game itself (`portrait.gd`).
