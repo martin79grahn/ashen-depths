@@ -2,11 +2,16 @@
 config_version=5
 
 [application]
+config/version="1.2.0"
 config/name="Ashen Depths"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.png"
 config/quit_on_go_back=false
+
+[autoload]
+
+UpdateChecker="*res://update_checker.gd"
 
 [display]
 window/size/viewport_width=1280
@@ -20,3 +25,8 @@ renderer/rendering_method="forward_plus"
 textures/vram_compression/import_etc2_astc=true
 viewport/hdr_2d=true
 environment/defaults/default_clear_color=Color(0.01, 0.01, 0.01, 1)
+
+[update_checker]
+
+repo="martin79grahn/ashen-depths"
+store_url="http://192.168.0.97:8787"
