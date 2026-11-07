@@ -11,26 +11,31 @@ extends CanvasLayer
 ##                                Keep it the same as Android "version/name" in the export preset.
 ##   update_checker/repo          "owner/repo" on GitHub
 ##   update_checker/store_url     e.g. "http://192.168.0.97:8787"
+##   update_checker/language      "sv" or "en" (default: the device's language)
 ##
 ## It only runs in exported builds. To test from the editor/command line:
 ##   godot --path . -- --update-check            (use real version)
 ##   godot --path . -- --update-check-as=0.0.1   (pretend to be an old version)
 ##
-## Manual check from a menu button:  UpdateChecker.check()
+## Manual check from a menu button:  UpdateChecker.check(true, true)
+## (shows "you have the latest version" / "couldn't check" too). While it runs, `busy` is true
+## and button_text() returns "Checking…", so a menu can show that.
 
 signal check_finished(update: Dictionary)  ## empty Dictionary = up to date / unreachable
 
 const DEFAULT_STORE := "http://192.168.0.97:8787"
 const TIMEOUT := 5.0
 
+var busy := false
 var _ui: Control
 var _was_paused := false
-var _sv := OS.get_locale_language() == "sv"
+var _sv := false
 
 
 func _ready() -> void:
 	layer = 128
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_sv = str(ProjectSettings.get_setting("update_checker/language", OS.get_locale_language())) == "sv"
 	if OS.has_feature("web"):
 		return  # the web version is always the latest
 	if not OS.has_feature("template") and not _forced():
@@ -63,20 +68,34 @@ func platform() -> String:
 	return "linux"
 
 
-## Checks for an update and shows the popup if one is found.
+## Text for a menu button: "Check for updates" or "Checking…" (Swedish if the device is).
+func button_text() -> String:
+	if busy:
+		return "Söker..." if _sv else "Checking..."
+	return "Sök efter uppdatering" if _sv else "Check for updates"
+
+
+## Checks for an update and shows the popup if one is found. With manual = true it also
+## tells you when you're up to date or the check failed.
 ## Returns {version, name, notes, url, source} or {} if up to date / offline.
-func check(show_popup := true) -> Dictionary:
+func check(show_popup := true, manual := false) -> Dictionary:
 	var repo := str(ProjectSettings.get_setting("update_checker/repo", ""))
-	if repo == "":
-		push_warning("UpdateChecker: set update_checker/repo in Project Settings")
+	if repo == "" or busy:
+		if repo == "":
+			push_warning("UpdateChecker: set update_checker/repo in Project Settings")
 		return {}
+	busy = true
 	var store := str(ProjectSettings.get_setting("update_checker/store_url", DEFAULT_STORE)).trim_suffix("/")
 	var latest := await _from_store(store, repo)
 	if latest.is_empty():
 		latest = await _from_github(repo)
+	busy = false
 	var result := {}
 	if latest.is_empty():
 		print("[UpdateChecker] could not reach store or GitHub")
+		if manual and show_popup:
+			_dialog("Kunde inte söka" if _sv else "Couldn't check for updates",
+				"Är du ansluten till internet?" if _sv else "Are you connected to the internet?", "", {})
 	elif is_newer(latest.version, current_version()):
 		result = latest
 		print("[UpdateChecker] update available: %s -> %s via %s (%s)" % [current_version(), latest.version, latest.source, latest.url])
@@ -84,6 +103,9 @@ func check(show_popup := true) -> Dictionary:
 			_show(latest)
 	else:
 		print("[UpdateChecker] up to date (%s, latest %s)" % [current_version(), latest.version])
+		if manual and show_popup:
+			_dialog("Du har senaste versionen" if _sv else "You're up to date",
+				"Version %s" % current_version(), "", {})
 	check_finished.emit(result)
 	return result
 
@@ -155,18 +177,21 @@ static func _parts(v: String) -> Array[int]:
 
 # ------------------------------------------------------------------ popup
 
+## The first section of the release notes ("What's new"), without markdown, max 6 lines.
 func _clean_notes(md: String) -> String:
-	var re := RegEx.new()
-	re.compile("\\[([^\\]]*)\\]\\([^)]*\\)")  # [text](link) -> text
-	md = re.sub(md, "$1", true)
-	re.compile("(?m)^\\s*[-*+]\\s+")  # bullets
-	md = re.sub(md, "• ", true)
-	re.compile("[#*`_>]+")
-	md = re.sub(md, "", true)
+	var link := RegEx.create_from_string("\\[([^\\]]*)\\]\\([^)]*\\)")  # [text](link) -> text
+	var bullet := RegEx.create_from_string("^[-*+]\\s+")
+	var marks := RegEx.create_from_string("[#*`_>]+")
 	var lines := PackedStringArray()
-	for l in md.split("\n"):
-		if l.strip_edges() != "":
-			lines.append(l.strip_edges())
+	for raw in md.split("\n"):
+		var l := raw.strip_edges()
+		if l.begins_with("#"):  # a heading: skip the first, stop at the next
+			if lines.size() > 0:
+				break
+			continue
+		l = marks.sub(bullet.sub(link.sub(l, "$1", true), "• "), "", true).strip_edges()
+		if l != "":
+			lines.append(l)
 		if lines.size() >= 6:
 			break
 	var text := "\n".join(lines)
@@ -174,6 +199,14 @@ func _clean_notes(md: String) -> String:
 
 
 func _show(u: Dictionary) -> void:
+	var notes := _clean_notes(u.notes)
+	if notes == "":
+		notes = u.name
+	_dialog("Ny version finns!" if _sv else "Update available", "%s  →  %s" % [current_version(), u.version], notes, u)
+
+
+## A popup. With an update (u not empty): "Later" / "Update"; otherwise just "OK".
+func _dialog(title_text: String, sub_text: String, body_text: String, u: Dictionary) -> void:
 	if _ui:
 		_ui.queue_free()
 	_was_paused = get_tree().paused
@@ -211,22 +244,25 @@ func _show(u: Dictionary) -> void:
 	box.add_theme_constant_override("separation", int(fs * 0.6))
 	panel.add_child(box)
 
-	var title := _label("Ny version finns!" if _sv else "Update available", int(fs * 1.35))
-	box.add_child(title)
-	var sub := _label("%s  →  %s" % [current_version(), u.version], fs)
+	box.add_child(_label(title_text, int(fs * 1.35)))
+	var sub := _label(sub_text, fs)
 	sub.modulate = Color(0.65, 0.75, 1.0)
 	box.add_child(sub)
-	var notes := _clean_notes(u.notes)
-	if notes == "":
-		notes = u.name
-	var body := _label(notes, int(fs * 0.8))
-	body.modulate = Color(0.85, 0.87, 0.92)
-	box.add_child(body)
+	if body_text != "":
+		var body := _label(body_text, int(fs * 0.8))
+		body.modulate = Color(0.85, 0.87, 0.92)
+		box.add_child(body)
 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", int(fs * 0.6))
 	row.alignment = BoxContainer.ALIGNMENT_END
 	box.add_child(row)
+	if u.is_empty():
+		var ok := _button("OK", fs, true)
+		ok.pressed.connect(_close)
+		row.add_child(ok)
+		ok.grab_focus()
+		return
 	var later := _button("Senare" if _sv else "Later", fs, false)
 	later.pressed.connect(_close)
 	row.add_child(later)

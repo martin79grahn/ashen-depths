@@ -2,7 +2,7 @@
 config_version=5
 
 [application]
-config/version="1.2.0"
+config/version="1.3.0"
 config/name="Ashen Depths"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
@@ -30,3 +30,4 @@ environment/defaults/default_clear_color=Color(0.01, 0.01, 0.01, 1)
 
 repo="martin79grahn/ashen-depths"
 store_url="http://192.168.0.97:8787"
+language="en"

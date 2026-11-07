@@ -1023,6 +1023,14 @@ func _notification(what: int) -> void:
 		elif dead:
 			_to_menu()
 
+## The menu's "Check for updates" button (U on a keyboard).
+func _check_updates() -> void:
+	if UpdateChecker.busy:
+		return
+	audio.play_ui("coin", -10.0)
+	UpdateChecker.check(true, true)
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state == "menu" and manual_open:
@@ -1064,6 +1072,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_D: cycle_difficulty()
 			elif event.keycode == KEY_H:
 				manual_open = true
+			elif event.keycode == KEY_U:
+				_check_updates()
 			return
 		match event.keycode:
 			KEY_1: _drink_hp()
@@ -1094,6 +1104,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			if hud.manual_button_rect().has_point(event.position):
 				manual_open = true
 				audio.play_ui("coin", -10.0)
+				return
+			if hud.update_button_rect().has_point(event.position):
+				_check_updates()
 				return
 			for i in 2:
 				if hud.card_rect(i).has_point(event.position):

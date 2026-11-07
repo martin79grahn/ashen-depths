@@ -668,7 +668,11 @@ const MANUAL_TABS := ["Heroes", "Weapons", "Magic", "Enemies", "Bosses", "Items 
 
 
 func manual_button_rect() -> Rect2:
-	return Rect2(size.x / 2 - 110, size.y * 0.32 + 404, 220, 30)
+	return Rect2(size.x / 2 - 230, size.y * 0.32 + 404, 220, 30)
+
+
+func update_button_rect() -> Rect2:
+	return Rect2(size.x / 2 + 10, size.y * 0.32 + 404, 220, 30)
 
 
 func _manual_rect() -> Rect2:
@@ -1119,6 +1123,12 @@ func _draw_menu() -> void:
 	draw_rect(hb, Color(0.16, 0.12, 0.07) if hhot else Color(0.08, 0.07, 0.06, 0.95))
 	draw_rect(hb, Color(1.0, 0.8, 0.35) if hhot else Color(0.55, 0.43, 0.25), false, 1.5)
 	_label("How to Play  [H]", hb.get_center() + Vector2(0, -1), 15, Color(0.95, 0.85, 0.6))
+	var ub := update_button_rect()
+	var uhot := ub.has_point(mouse) and not UpdateChecker.busy
+	draw_rect(ub, Color(0.16, 0.12, 0.07) if uhot else Color(0.08, 0.07, 0.06, 0.95))
+	draw_rect(ub, Color(1.0, 0.8, 0.35) if uhot else Color(0.55, 0.43, 0.25), false, 1.5)
+	_label(UpdateChecker.button_text() + ("" if UpdateChecker.busy else "  [U]"), ub.get_center() + Vector2(0, -1), 15,
+		Color(0.6, 0.55, 0.45) if UpdateChecker.busy else Color(0.95, 0.85, 0.6))
 	_label("F9: debug mode — %s" % ("ON, invincible" if main.debug else "off"), Vector2(sz.x - 16, sz.y - 18), 13,
 		Color(0.4, 0.85, 1.0) if main.debug else Color(0.6, 0.55, 0.45, 0.7), HORIZONTAL_ALIGNMENT_RIGHT)
 
