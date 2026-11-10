@@ -1,8 +1,9 @@
 extends CanvasLayer
 ## Release Store update checker (autoload as "UpdateChecker").
 ##
-## At startup it asks your Release Store whether a newer release exists. If the
-## store can't be reached (e.g. away from home) it asks GitHub directly. If there
+## At startup it asks your Release Store whether a newer release exists. It tries the
+## store's home-network address first, then its Tailscale address (works anywhere when
+## Tailscale is on). If neither answers it asks GitHub directly. If there
 ## is a newer version it shows a popup with "Update" / "Later". "Update" opens the
 ## download in the phone's browser; when it finishes, tap it to install over the old version.
 ##
@@ -10,7 +11,8 @@ extends CanvasLayer
 ##   application/config/version   this build's version, e.g. "1.2.0".
 ##                                Keep it the same as Android "version/name" in the export preset.
 ##   update_checker/repo          "owner/repo" on GitHub
-##   update_checker/store_url     e.g. "http://192.168.0.97:8787"
+##   update_checker/store_url     e.g. "http://192.168.0.97:8787"; several, comma-separated,
+##                                are tried in order (default: DEFAULT_STORES)
 ##   update_checker/language      "sv" or "en" (default: the device's language)
 ##
 ## It only runs in exported builds. To test from the editor/command line:
@@ -23,7 +25,7 @@ extends CanvasLayer
 
 signal check_finished(update: Dictionary)  ## empty Dictionary = up to date / unreachable
 
-const DEFAULT_STORE := "http://192.168.0.97:8787"
+const DEFAULT_STORES := "http://192.168.0.97:8787,http://100.85.197.108:8787"  # home Wi-Fi, Tailscale
 const TIMEOUT := 5.0
 
 var busy := false
@@ -85,8 +87,11 @@ func check(show_popup := true, manual := false) -> Dictionary:
 			push_warning("UpdateChecker: set update_checker/repo in Project Settings")
 		return {}
 	busy = true
-	var store := str(ProjectSettings.get_setting("update_checker/store_url", DEFAULT_STORE)).trim_suffix("/")
-	var latest := await _from_store(store, repo)
+	var latest := {}
+	for store in str(ProjectSettings.get_setting("update_checker/store_url", DEFAULT_STORES)).split(",", false):
+		latest = await _from_store(store.strip_edges().trim_suffix("/"), repo)
+		if not latest.is_empty():
+			break
 	if latest.is_empty():
 		latest = await _from_github(repo)
 	busy = false
