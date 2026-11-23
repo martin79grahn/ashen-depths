@@ -4,8 +4,13 @@ extends CanvasLayer
 ## At startup it asks your Release Store whether a newer release exists. It tries the
 ## store's home-network address first, then its Tailscale address (works anywhere when
 ## Tailscale is on). If neither answers it asks GitHub directly. If there
-## is a newer version it shows a popup with "Update" / "Later". "Update" opens the
-## download in the phone's browser; when it finishes, tap it to install over the old version.
+## is a newer version it shows a popup with "Update" / "Later". On Android "Update" downloads the
+## APK inside the game (with a progress bar) and opens Android's installer, which installs it over
+## the old version (the first time Android asks to allow installing apps from this game). If the
+## download fails it falls back to opening the link in the browser. On PC it opens the store page.
+##
+## Android export preset: permissions/internet=true and permissions/custom_permissions containing
+## "android.permission.REQUEST_INSTALL_PACKAGES" (godot_release.py --wire sets both).
 ##
 ## Project settings:
 ##   application/config/version   this build's version, e.g. "1.2.0".
@@ -14,6 +19,7 @@ extends CanvasLayer
 ##   update_checker/store_url     e.g. "http://192.168.0.97:8787"; several, comma-separated,
 ##                                are tried in order (default: DEFAULT_STORES)
 ##   update_checker/language      "sv" or "en" (default: the device's language)
+##   update_checker/key           the store's access key; needed for private repos
 ##
 ## It only runs in exported builds. To test from the editor/command line:
 ##   godot --path . -- --update-check            (use real version)
@@ -30,6 +36,9 @@ const TIMEOUT := 5.0
 
 var busy := false
 var _ui: Control
+var _dl: HTTPRequest
+var _bar: ProgressBar
+var _status: Label
 var _was_paused := false
 var _sv := false
 
@@ -40,6 +49,8 @@ func _ready() -> void:
 	_sv = str(ProjectSettings.get_setting("update_checker/language", OS.get_locale_language())) == "sv"
 	if OS.has_feature("web"):
 		return  # the web version is always the latest
+	if FileAccess.file_exists(_apk_path()):
+		DirAccess.remove_absolute(_apk_path())  # left over from the last update
 	if not OS.has_feature("template") and not _forced():
 		return  # don't nag while developing in the editor
 	await get_tree().create_timer(1.5).timeout
@@ -116,17 +127,21 @@ func check(show_popup := true, manual := false) -> Dictionary:
 
 
 func _from_store(store: String, repo: String) -> Dictionary:
-	var d = await _get_json("%s/api/update/%s?platform=%s" % [store, repo, platform()])
+	var key := str(ProjectSettings.get_setting("update_checker/key", ""))
+	var q := "&key=" + key.uri_encode() if key != "" else ""
+	var d = await _get_json("%s/api/update/%s?platform=%s%s" % [store, repo, platform(), q])
 	if not d is Dictionary or not d.has("version"):
 		return {}
 	var url := ""
+	var apk := false
 	if platform() == "android" and d.get("download_url"):
 		url = str(d.download_url)
 		if url.begins_with("/"):
-			url = store + url
+			url = store + url + ("?" + q.substr(1) if q != "" else "")
+		apk = true
 	else:
 		url = store + str(d.store_page)  # on PC the store page has Install / Download
-	return {"version": str(d.version), "name": str(d.name), "notes": str(d.notes), "url": url, "source": "store"}
+	return {"version": str(d.version), "name": str(d.name), "notes": str(d.notes), "url": url, "source": "store", "apk": apk}
 
 
 func _from_github(repo: String) -> Dictionary:
@@ -143,7 +158,7 @@ func _from_github(repo: String) -> Dictionary:
 					url = str(a.browser_download_url)
 	var tag := str(d.tag_name)
 	return {"version": tag.trim_prefix("v").trim_prefix("V"), "name": str(d.get("name", tag)),
-		"notes": str(d.get("body", "")), "url": url, "source": "github"}
+		"notes": str(d.get("body", "")), "url": url, "source": "github", "apk": url.to_lower().ends_with(".apk")}
 
 
 func _get_json(url: String):
@@ -273,8 +288,11 @@ func _dialog(title_text: String, sub_text: String, body_text: String, u: Diction
 	row.add_child(later)
 	var go := _button("Uppdatera" if _sv else "Update", fs, true)
 	go.pressed.connect(func():
-		OS.shell_open(u.url)
-		_close())
+		if platform() == "android" and u.get("apk", false):
+			_download(u, box, row, fs)
+		else:
+			OS.shell_open(u.url)
+			_close())
 	row.add_child(go)
 	go.grab_focus()
 
@@ -310,7 +328,101 @@ func _button(text: String, size: int, primary: bool) -> Button:
 	return b
 
 
+# ------------------------------------------------------------------ in-app download + install (Android)
+
+func _apk_path() -> String:
+	return OS.get_user_data_dir().path_join("update.apk")
+
+
+## Swap the popup's buttons for a progress bar, download the APK into the game's own files
+## and hand it to Android's package installer (Godot opens local files through its FileProvider).
+func _download(u: Dictionary, box: VBoxContainer, row: HBoxContainer, fs: int) -> void:
+	for c in row.get_children():
+		c.queue_free()
+	_status = _label("Laddar ner…" if _sv else "Downloading…", int(fs * 0.85))
+	box.add_child(_status)
+	box.move_child(_status, row.get_index())
+	_bar = ProgressBar.new()
+	_bar.custom_minimum_size.y = fs * 0.9
+	_bar.show_percentage = false
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color(0.42, 0.56, 1.0)
+	fill.set_corner_radius_all(int(fs * 0.45))
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(1, 1, 1, 0.08)
+	bg.set_corner_radius_all(int(fs * 0.45))
+	_bar.add_theme_stylebox_override("fill", fill)
+	_bar.add_theme_stylebox_override("background", bg)
+	box.add_child(_bar)
+	box.move_child(_bar, row.get_index())
+	var cancel := _button("Avbryt" if _sv else "Cancel", fs, false)
+	cancel.pressed.connect(func():
+		if _dl:
+			_dl.cancel_request()
+			_dl.queue_free()
+			_dl = null
+		_close())
+	row.add_child(cancel)
+
+	_dl = HTTPRequest.new()
+	_dl.use_threads = true
+	_dl.download_file = _apk_path()
+	_dl.timeout = 300.0
+	add_child(_dl)
+	_dl.request_completed.connect(func(result: int, code: int, _h, _b):
+		_finish_download(result, code, u, row, fs))
+	if _dl.request(u.url) != OK:
+		_finish_download(HTTPRequest.RESULT_CANT_CONNECT, 0, u, row, fs)
+
+
+func _process(_delta: float) -> void:
+	if _dl and _bar and is_instance_valid(_bar):
+		var total := _dl.get_body_size()
+		var got := _dl.get_downloaded_bytes()
+		if total > 0:
+			_bar.value = 100.0 * got / total
+			_status.text = ("Laddar ner… %d av %d MB" if _sv else "Downloading… %d of %d MB") % [got / 1048576, max(1, total / 1048576)]
+
+
+func _finish_download(result: int, code: int, u: Dictionary, row: HBoxContainer, fs: int) -> void:
+	if _dl:
+		_dl.queue_free()
+		_dl = null
+	if not _ui or not is_instance_valid(row):
+		return  # cancelled
+	for c in row.get_children():
+		c.queue_free()
+	var ok := result == HTTPRequest.RESULT_SUCCESS and code == 200 and FileAccess.file_exists(_apk_path()) \
+		and FileAccess.get_file_as_bytes(_apk_path()).slice(0, 2) == PackedByteArray([0x50, 0x4B])  # an APK is a zip
+	if not ok:
+		print("[UpdateChecker] download failed: result %d, HTTP %d" % [result, code])
+		_status.text = "Nedladdningen misslyckades. Öppnar i webbläsaren i stället." if _sv else "Download failed. Opening it in the browser instead."
+		var later := _button("Stäng" if _sv else "Close", fs, false)
+		later.pressed.connect(_close)
+		row.add_child(later)
+		OS.shell_open(u.url)
+		return
+	_bar.value = 100
+	_status.text = "Klar! Tryck Installera i rutan som kommer upp." if _sv else "Done! Tap Install in the dialog that opens."
+	var close := _button("Stäng" if _sv else "Close", fs, false)
+	close.pressed.connect(_close)
+	row.add_child(close)
+	var inst := _button("Installera" if _sv else "Install", fs, true)
+	inst.pressed.connect(_install)
+	row.add_child(inst)
+	inst.grab_focus()
+	_install()
+
+
+func _install() -> void:
+	var err := OS.shell_open(_apk_path())
+	if err != OK:
+		print("[UpdateChecker] could not open the installer: %d" % err)
+
+
 func _close() -> void:
+	_bar = null
+	_status = null
 	if _ui:
 		_ui.queue_free()
 		_ui = null
